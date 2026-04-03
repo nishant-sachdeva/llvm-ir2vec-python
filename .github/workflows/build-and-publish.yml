@@ -208,6 +208,46 @@ jobs:
       - name: Extract LLVM build
         run: tar xf build-llvm.tar
 
+      # --- Install build tools needed for CMake reconfiguration ---
+      # Phase 2 runs in a fresh container/runner — cmake and ninja from Phase 1
+      # are NOT carried over. CMakeCache.txt has CMAKE_MAKE_PROGRAM pointing to
+      # ninja at its Phase 1 path, so we must install ninja and update the cache.
+      - name: Install build deps (manylinux)
+        if: matrix.container != ''
+        run: |
+          # cmake + git
+          yum install -y cmake3 git 2>/dev/null || true
+          if ! command -v cmake &>/dev/null; then
+            if command -v cmake3 &>/dev/null; then
+              ln -s $(which cmake3) /usr/local/bin/cmake
+            fi
+          fi
+          # ninja — install via pip for a consistent, recent version
+          /opt/python/cp311-cp311/bin/pip install ninja
+          ln -sf "$(/opt/python/cp311-cp311/bin/python -c 'import ninja; print(ninja.BIN_DIR)')/ninja" \
+            /usr/local/bin/ninja
+          echo "cmake: $(cmake --version | head -1)"
+          echo "ninja: $(ninja --version)"
+
+          # Fix CMAKE_MAKE_PROGRAM in CMakeCache.txt — Phase 1 recorded an
+          # absolute path to ninja that doesn't exist in this container.
+          NINJA_PATH="$(which ninja)"
+          sed -i "s|^CMAKE_MAKE_PROGRAM:FILEPATH=.*|CMAKE_MAKE_PROGRAM:FILEPATH=${NINJA_PATH}|" \
+            build-llvm/CMakeCache.txt
+
+      - name: Install build deps (macOS)
+        if: matrix.container == ''
+        run: |
+          # macOS runners typically have cmake; ensure ninja is present too
+          brew install cmake ninja 2>/dev/null || true
+          echo "cmake: $(cmake --version | head -1)"
+          echo "ninja: $(ninja --version)"
+
+          # Fix CMAKE_MAKE_PROGRAM in CMakeCache.txt
+          NINJA_PATH="$(which ninja)"
+          sed -i '' "s|^CMAKE_MAKE_PROGRAM:FILEPATH=.*|CMAKE_MAKE_PROGRAM:FILEPATH=${NINJA_PATH}|" \
+            build-llvm/CMakeCache.txt
+
       # --- Clone LLVM source (needed for CMake reconfiguration in Phase 2) ---
       # Phase 1 recorded an absolute source path in CMakeCache.txt that doesn't
       # exist in this job. build_binding.sh handles this by detecting the missing
@@ -215,13 +255,6 @@ jobs:
       - name: Read LLVM version
         id: llvm-ver
         run: echo "version=$(cat LLVM_VERSION | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
-
-      - name: Install git (manylinux)
-        if: matrix.container != ''
-        run: |
-          if ! command -v git &>/dev/null; then
-            yum install -y git
-          fi
 
       - name: Clone LLVM source (shallow)
         run: |
