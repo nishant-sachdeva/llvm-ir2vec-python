@@ -57,17 +57,15 @@ jobs:
       - name: Install build deps (manylinux)
         if: matrix.container != ''
         run: |
-          yum install -y cmake3 git unzip
+          yum install -y cmake3 git
           if ! command -v cmake &>/dev/null; then
             ln -s $(which cmake3) /usr/local/bin/cmake
           fi
-          # System ninja in manylinux_2_28 is 1.10.x — too old for LLVM's multi-output
-          # TableGen rules (requires Ninja >= 1.11.0, fixed in ninja#1462)
-          NINJA_VER="1.12.1"
-          curl -fsSL "https://github.com/ninja-build/ninja/releases/download/v${NINJA_VER}/ninja-linux.zip" \
-            -o /tmp/ninja.zip
-          unzip /tmp/ninja.zip -d /usr/local/bin/
-          chmod +x /usr/local/bin/ninja
+          # Install Ninja via pip — arch-agnostic, always >= 1.11
+          # System ninja in manylinux_2_28 is 1.10.x, too old for LLVM's multi-output TableGen rules
+          /opt/python/cp311-cp311/bin/pip install ninja
+          ln -sf "$(/opt/python/cp311-cp311/bin/python -c 'import ninja; print(ninja.BIN_DIR)')/ninja" \
+            /usr/local/bin/ninja
           echo "Ninja version: $(ninja --version)"
 
       - name: Install build deps (macOS)
