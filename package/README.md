@@ -18,7 +18,7 @@ in machine learning-based compiler optimization.
 ## Installation
 
 ```bash
-pip install ir2vec
+pip install llvm-ir2vec
 ```
 
 ## Usage
@@ -33,6 +33,19 @@ emb = ir2vec.Embedder(
 )
 embeddings = emb.getFuncEmbMap()
 ```
+## Note on Package Naming
+
+This package is published on testPyPI as `llvm-ir2vec` but the Python module
+is imported as `ir2vec`:
+```bash
+pip install llvm-ir2vec
+```
+```python
+import ir2vec
+```
+
+If you have another package installed that also provides an `ir2vec` module,
+there may be a conflict. Uninstall the conflicting package before using this one.
 
 ## Source
 

@@ -1,0 +1,376 @@
+# Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+name: Build and Publish Wheels
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# ===========================================================================
+# PHASE 1: Build LLVM static libraries (once per platform)
+#
+# This is the expensive step (~15-25 min). It clones llvm-project, builds
+# all static libraries with PIC enabled, and uploads the build tree as an
+# artifact for Phase 2 to consume.
+#
+# Linux builds run inside manylinux_2_28 containers to ensure the resulting
+# binaries only depend on glibc 2.28+. macOS builds run on native runners.
+# ===========================================================================
+jobs:
+  build-llvm:
+    name: "LLVM / ${{ matrix.platform }}"
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container || null }}
+    timeout-minutes: 120
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            runner: ubuntu-latest
+            container: quay.io/pypa/manylinux_2_28_x86_64
+
+          - platform: linux-aarch64
+            runner: ubuntu-24.04-arm
+            container: quay.io/pypa/manylinux_2_28_aarch64
+
+          - platform: macos-arm64
+            runner: macos-14
+            container: ""
+
+          - platform: macos-x86_64
+            runner: macos-13
+            container: ""
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps (manylinux)
+        if: matrix.container != ''
+        run: |
+          yum install -y cmake3 ninja-build git
+          if ! command -v cmake &>/dev/null; then
+            ln -s $(which cmake3) /usr/local/bin/cmake
+          fi
+
+      - name: Install build deps (macOS)
+        if: matrix.container == ''
+        run: brew install cmake ninja
+
+      - name: Read LLVM version
+        id: llvm-ver
+        run: echo "version=$(cat LLVM_VERSION | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache LLVM build
+        id: cache-llvm
+        uses: actions/cache@v4
+        with:
+          path: build-llvm
+          key: llvm-${{ matrix.platform }}-${{ steps.llvm-ver.outputs.version }}-${{ hashFiles('buildscripts/build_llvm.sh') }}
+
+      - name: Build LLVM (Phase 1)
+        if: steps.cache-llvm.outputs.cache-hit != 'true'
+        run: |
+          chmod +x buildscripts/build_llvm.sh
+          ./buildscripts/build_llvm.sh
+
+      - name: Package build artifacts
+        run: |
+          # Package only what Phase 2 needs. Exclude object files to save space.
+          # The tar may warn about some paths not existing on all platforms — that's fine.
+          tar cf build-llvm.tar \
+            --exclude='CMakeFiles' \
+            --exclude='*.o' \
+            --exclude='*.cpp.o' \
+            build-llvm/lib/ \
+            build-llvm/include/ \
+            build-llvm/CMakeCache.txt \
+            build-llvm/tools/llvm-ir2vec/ \
+            build-llvm/build.ninja \
+            build-llvm/rules.ninja \
+          2>/dev/null || true
+
+      - name: Upload LLVM build
+        uses: actions/upload-artifact@v4
+        with:
+          name: llvm-${{ matrix.platform }}
+          path: build-llvm.tar
+          retention-days: 1
+          compression-level: 6
+
+  # ===========================================================================
+  # PHASE 2 + 3: Build nanobind module + wheel (per platform × Python version)
+  #
+  # GitHub Actions matrix.include does NOT do cross-products — each entry is
+  # one explicit job. We list all 16 combinations (4 platforms × 4 Pythons).
+  # ===========================================================================
+  build-wheels:
+    name: "Wheel / ${{ matrix.platform }} / py${{ matrix.python }}"
+    needs: build-llvm
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container || null }}
+    timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ---- Linux x86_64 ----
+          - platform: linux-x86_64
+            python: "3.10"
+            runner: ubuntu-latest
+            container: quay.io/pypa/manylinux_2_28_x86_64
+            manylinux-plat: manylinux_2_28_x86_64
+          - platform: linux-x86_64
+            python: "3.11"
+            runner: ubuntu-latest
+            container: quay.io/pypa/manylinux_2_28_x86_64
+            manylinux-plat: manylinux_2_28_x86_64
+          - platform: linux-x86_64
+            python: "3.12"
+            runner: ubuntu-latest
+            container: quay.io/pypa/manylinux_2_28_x86_64
+            manylinux-plat: manylinux_2_28_x86_64
+          - platform: linux-x86_64
+            python: "3.13"
+            runner: ubuntu-latest
+            container: quay.io/pypa/manylinux_2_28_x86_64
+            manylinux-plat: manylinux_2_28_x86_64
+
+          # ---- Linux aarch64 ----
+          - platform: linux-aarch64
+            python: "3.10"
+            runner: ubuntu-24.04-arm
+            container: quay.io/pypa/manylinux_2_28_aarch64
+            manylinux-plat: manylinux_2_28_aarch64
+          - platform: linux-aarch64
+            python: "3.11"
+            runner: ubuntu-24.04-arm
+            container: quay.io/pypa/manylinux_2_28_aarch64
+            manylinux-plat: manylinux_2_28_aarch64
+          - platform: linux-aarch64
+            python: "3.12"
+            runner: ubuntu-24.04-arm
+            container: quay.io/pypa/manylinux_2_28_aarch64
+            manylinux-plat: manylinux_2_28_aarch64
+          - platform: linux-aarch64
+            python: "3.13"
+            runner: ubuntu-24.04-arm
+            container: quay.io/pypa/manylinux_2_28_aarch64
+            manylinux-plat: manylinux_2_28_aarch64
+
+          # ---- macOS arm64 (Apple Silicon) ----
+          - platform: macos-arm64
+            python: "3.10"
+            runner: macos-14
+            container: ""
+            manylinux-plat: ""
+          - platform: macos-arm64
+            python: "3.11"
+            runner: macos-14
+            container: ""
+            manylinux-plat: ""
+          - platform: macos-arm64
+            python: "3.12"
+            runner: macos-14
+            container: ""
+            manylinux-plat: ""
+          - platform: macos-arm64
+            python: "3.13"
+            runner: macos-14
+            container: ""
+            manylinux-plat: ""
+
+          # ---- macOS x86_64 (Intel) ----
+          - platform: macos-x86_64
+            python: "3.10"
+            runner: macos-13
+            container: ""
+            manylinux-plat: ""
+          - platform: macos-x86_64
+            python: "3.11"
+            runner: macos-13
+            container: ""
+            manylinux-plat: ""
+          - platform: macos-x86_64
+            python: "3.12"
+            runner: macos-13
+            container: ""
+            manylinux-plat: ""
+          - platform: macos-x86_64
+            python: "3.13"
+            runner: macos-13
+            container: ""
+            manylinux-plat: ""
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- Download and extract LLVM build from Phase 1 ---
+      - name: Download LLVM build
+        uses: actions/download-artifact@v4
+        with:
+          name: llvm-${{ matrix.platform }}
+
+      - name: Extract LLVM build
+        run: tar xf build-llvm.tar
+
+      # --- Set up Python ---
+      # manylinux containers have all Python versions at /opt/python/cpXYZ-cpXYZ/
+      # macOS uses actions/setup-python
+      - name: Find Python (manylinux)
+        if: matrix.container != ''
+        id: py-ml
+        run: |
+          PY_TAG="cp$(echo '${{ matrix.python }}' | tr -d '.')"
+          PY_DIR=$(find /opt/python -maxdepth 1 -name "${PY_TAG}-*" | head -1)
+          if [ -z "$PY_DIR" ]; then
+            echo "ERROR: Python ${{ matrix.python }} not found in /opt/python/"
+            ls /opt/python/
+            exit 1
+          fi
+          echo "exe=${PY_DIR}/bin/python" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python (macOS)
+        if: matrix.container == ''
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Resolve Python path
+        id: py
+        run: |
+          if [ -n "${{ steps.py-ml.outputs.exe }}" ]; then
+            PY="${{ steps.py-ml.outputs.exe }}"
+          else
+            PY="$(which python${{ matrix.python }} 2>/dev/null || which python3)"
+          fi
+          # Resolve to absolute path so CMake cannot find a different one
+          PY="$(readlink -f "$PY" 2>/dev/null || echo "$PY")"
+          echo "exe=$PY" >> "$GITHUB_OUTPUT"
+          echo "Using: $($PY --version) at $PY"
+
+      # --- Phase 2: Build nanobind module ---
+      - name: Build binding
+        run: |
+          chmod +x buildscripts/build_binding.sh
+          ./buildscripts/build_binding.sh \
+            "${{ steps.py.outputs.exe }}" \
+            ./build-llvm \
+            ./package/
+
+      # --- Verify the module before packaging ---
+      - name: Test module
+        run: |
+          chmod +x buildscripts/test_module.sh
+          ./buildscripts/test_module.sh \
+            "${{ steps.py.outputs.exe }}" \
+            ./package/
+
+      # --- Phase 3: Build and repair wheel ---
+      - name: Install patchelf (manylinux)
+        if: matrix.container != ''
+        run: yum install -y patchelf 2>/dev/null || "${{ steps.py.outputs.exe }}" -m pip install patchelf
+
+      - name: Build wheel
+        env:
+          MANYLINUX_PLAT: ${{ matrix.manylinux-plat }}
+        run: |
+          chmod +x buildscripts/build_wheel.sh
+          ./buildscripts/build_wheel.sh \
+            "${{ steps.py.outputs.exe }}" \
+            ./package \
+            ./dist/
+
+      # --- Smoke test: install wheel in clean venv and import ---
+      - name: Test wheel
+        run: |
+          PY="${{ steps.py.outputs.exe }}"
+          "$PY" -m venv /tmp/test-whl
+          /tmp/test-whl/bin/python -m pip install --no-index --find-links dist/ ir2vec
+          /tmp/test-whl/bin/python -c "import ir2vec; print('Wheel test: OK')"
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.platform }}-py${{ matrix.python }}
+          path: dist/ir2vec-*.whl
+          retention-days: 7
+
+  # ===========================================================================
+  # PUBLISH to TestPyPI (every push to main) or PyPI (version tags only)
+  #
+  # Uses OIDC trusted publishing — no API tokens needed. Configure the
+  # trusted publisher on TestPyPI/PyPI before first use (see README).
+  # ===========================================================================
+  publish-testpypi:
+    name: "Publish → TestPyPI"
+    needs: build-wheels
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+
+    permissions:
+      id-token: write  # OIDC token for trusted publishing
+
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/llvm-ir2vec
+
+    steps:
+      - name: Download all wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          path: dist/
+          merge-multiple: true
+
+      - name: List wheels
+        run: |
+          echo "=== Wheels to publish ==="
+          ls -lh dist/
+          echo "Total: $(ls dist/*.whl 2>/dev/null | wc -l) wheels"
+
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          skip-existing: true
+          verbose: true
+
+  publish-pypi:
+    name: "Publish → PyPI"
+    needs: build-wheels
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    permissions:
+      id-token: write
+
+    environment:
+      name: pypi
+      url: https://pypi.org/p/ir2vec
+
+    steps:
+      - name: Download all wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          path: dist/
+          merge-multiple: true
+
+      - name: List wheels
+        run: ls -lh dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          verbose: true

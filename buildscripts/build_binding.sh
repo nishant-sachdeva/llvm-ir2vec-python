@@ -31,7 +31,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 PYTHON_EXE="${1:?Usage: build_binding.sh <python-executable> [build-dir] [output-dir]}"
-BUILD_DIR="${2:-$REPO_ROOT/test-build}"
+PYTHON_EXE="$(readlink -f "$(command -v "$PYTHON_EXE")" 2>/dev/null || echo "$PYTHON_EXE")"
+BUILD_DIR="${2:-$REPO_ROOT/build-llvm}"
 OUTPUT_DIR="${3:-$REPO_ROOT/package}"
 
 # Validate inputs

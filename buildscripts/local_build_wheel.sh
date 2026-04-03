@@ -13,17 +13,19 @@
 #   1. Validates the package directory structure
 #   2. Builds a wheel using pip
 #   3. Repairs the wheel for the target platform:
-#      - Linux: auditwheel repair (manylinux tag from MANYLINUX_PLAT or auto-detect)
+#      - Linux: auditwheel repair (produces manylinux_2_28 tag)
 #      - macOS: delocate-wheel (bundles dylibs, fixes rpaths)
-#      - Windows: delvewheel or copy as-is
+#      - Windows: no repair needed (or delvewheel if required)
 #   4. Outputs the final wheel to a dist/ directory
 #
 # Usage: ./buildscripts/build_wheel.sh <python-executable> [package-dir] [output-dir]
 #
-# Environment variables:
-#   MANYLINUX_PLAT  - Override the manylinux platform tag (e.g., manylinux_2_28_x86_64).
-#                     In CI (manylinux containers), set this explicitly.
-#                     If unset, auto-detects from auditwheel show.
+# Arguments:
+#   python-executable  - Python interpreter (must match the .so in package/)
+#   package-dir        - Directory containing pyproject.toml and ir2vec .so
+#                        (default: ./package)
+#   output-dir         - Where to place the final repaired wheel
+#                        (default: ./dist)
 
 set -euo pipefail
 
@@ -34,8 +36,6 @@ PYTHON_EXE="${1:?Usage: build_wheel.sh <python-executable> [package-dir] [output
 PACKAGE_DIR="${2:-$REPO_ROOT/package}"
 OUTPUT_DIR="${3:-$REPO_ROOT/dist}"
 
-# Resolve Python to absolute path to avoid CMake/pip confusion
-PYTHON_EXE="$(readlink -f "$(command -v "$PYTHON_EXE")" 2>/dev/null || echo "$PYTHON_EXE")"
 PY_VERSION=$("$PYTHON_EXE" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
 
 echo "=== IR2Vec Wheel Build (Phase 3) ==="
@@ -94,36 +94,27 @@ case "$OS" in
             exit 1
         }
 
-        # Show wheel analysis
+        # Detect the platform tag that auditwheel considers compatible.
+        # In CI (manylinux container), this will be manylinux_2_28.
+        # On a developer machine (e.g., Ubuntu 22.04), it will be higher
+        # (e.g., manylinux_2_35). We use whatever auditwheel reports
+        # rather than hardcoding, so the script works in both environments.
         echo "  auditwheel show:"
         "$PYTHON_EXE" -m auditwheel show "$RAW_WHEEL" || true
 
-        # Determine platform tag:
-        #   - CI sets MANYLINUX_PLAT explicitly (e.g., manylinux_2_28_x86_64)
-        #   - Local builds auto-detect from auditwheel show
-        if [ -n "${MANYLINUX_PLAT:-}" ]; then
-            PLAT="$MANYLINUX_PLAT"
-            echo "  Using MANYLINUX_PLAT from environment: $PLAT"
-        else
-            PLAT=$("$PYTHON_EXE" -m auditwheel show "$RAW_WHEEL" 2>/dev/null \
-                | grep -oP 'manylinux_\d+_\d+_\w+' | head -1 || true)
-            if [ -z "$PLAT" ]; then
-                echo "WARNING: Could not detect manylinux platform tag."
-                echo "Copying wheel without auditwheel repair."
-                cp "$RAW_WHEEL" "$OUTPUT_DIR/"
-                rm -rf "$WHEEL_TMPDIR"
-                FINAL_WHEEL=$(find "$OUTPUT_DIR" -name "ir2vec-*.whl" | sort | tail -1)
-                echo ""
-                echo "=== Phase 3 complete (unrepaired) ==="
-                echo "Wheel: $FINAL_WHEEL"
-                exit 0
-            fi
-            echo "  Auto-detected platform: $PLAT"
-        fi
+        DETECTED_PLAT=$("$PYTHON_EXE" -m auditwheel show "$RAW_WHEEL" 2>/dev/null \
+            | grep -oP 'manylinux_\d+_\d+_\w+' | head -1 || true)
 
-        "$PYTHON_EXE" -m auditwheel repair "$RAW_WHEEL" \
-            --plat "$PLAT" \
-            -w "$OUTPUT_DIR"
+        if [ -z "$DETECTED_PLAT" ]; then
+            echo "WARNING: Could not detect manylinux platform tag."
+            echo "Copying wheel without auditwheel repair."
+            cp "$RAW_WHEEL" "$OUTPUT_DIR/"
+        else
+            echo "  Detected platform: $DETECTED_PLAT"
+            "$PYTHON_EXE" -m auditwheel repair "$RAW_WHEEL" \
+                --plat "$DETECTED_PLAT" \
+                -w "$OUTPUT_DIR"
+        fi
         ;;
     Darwin)
         echo ">>> Repairing wheel with delocate ..."
@@ -138,6 +129,8 @@ case "$OS" in
         ;;
     MINGW*|MSYS*|CYGWIN*|Windows_NT)
         echo ">>> Windows: copying wheel as-is ..."
+        # Windows wheels typically don't need repair if all deps are
+        # statically linked. If needed, use delvewheel in the future.
         cp "$RAW_WHEEL" "$OUTPUT_DIR/"
         ;;
     *)
@@ -150,7 +143,7 @@ esac
 rm -rf "$WHEEL_TMPDIR"
 
 # --- Step 5: Report ---
-FINAL_WHEEL=$(find "$OUTPUT_DIR" -name "ir2vec-*.whl" | sort | tail -1)
+FINAL_WHEEL=$(find "$OUTPUT_DIR" -name "ir2vec-*.whl" -newer "$PACKAGE_DIR/pyproject.toml" | sort | tail -1)
 if [ -z "$FINAL_WHEEL" ]; then
     echo "ERROR: No final wheel found in $OUTPUT_DIR"
     exit 1
