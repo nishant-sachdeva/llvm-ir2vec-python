@@ -1,0 +1,12 @@
+# Build outputs
+dist/
+test-build/
+package/build/
+package/ir2vec.egg-info/
+
+# Compiled binaries
+*.so
+
+# Local test scripts
+test.sh
+test_all.sh
