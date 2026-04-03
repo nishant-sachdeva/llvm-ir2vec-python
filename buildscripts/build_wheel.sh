@@ -74,7 +74,7 @@ WHEEL_TMPDIR=$(mktemp -d)
     --no-cache-dir \
     -w "$WHEEL_TMPDIR"
 
-RAW_WHEEL=$(find "$WHEEL_TMPDIR" -name "ir2vec-*.whl" | head -1)
+RAW_WHEEL=$(find "$WHEEL_TMPDIR" -name "*.whl" | head -1)
 if [ -z "$RAW_WHEEL" ]; then
     echo "ERROR: Wheel build produced no .whl file"
     ls -la "$WHEEL_TMPDIR"
