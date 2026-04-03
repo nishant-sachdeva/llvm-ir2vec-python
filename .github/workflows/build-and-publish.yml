@@ -28,7 +28,7 @@ jobs:
   build-llvm:
     name: "LLVM / ${{ matrix.platform }}"
     runs-on: ${{ matrix.runner }}
-    container: ${{ matrix.container || null }}
+    container: ${{ matrix.container != '' && matrix.container || fromJSON('null') }}
     timeout-minutes: 120
 
     strategy:
@@ -45,10 +45,6 @@ jobs:
 
           - platform: macos-arm64
             runner: macos-14
-            container: ""
-
-          - platform: macos-x86_64
-            runner: macos-13
             container: ""
 
     steps:
@@ -123,7 +119,7 @@ jobs:
     name: "Wheel / ${{ matrix.platform }} / py${{ matrix.python }}"
     needs: build-llvm
     runs-on: ${{ matrix.runner }}
-    container: ${{ matrix.container || null }}
+    container: ${{ matrix.container != '' && matrix.container || fromJSON('null') }}
     timeout-minutes: 30
 
     strategy:
@@ -193,28 +189,6 @@ jobs:
           - platform: macos-arm64
             python: "3.13"
             runner: macos-14
-            container: ""
-            manylinux-plat: ""
-
-          # ---- macOS x86_64 (Intel) ----
-          - platform: macos-x86_64
-            python: "3.10"
-            runner: macos-13
-            container: ""
-            manylinux-plat: ""
-          - platform: macos-x86_64
-            python: "3.11"
-            runner: macos-13
-            container: ""
-            manylinux-plat: ""
-          - platform: macos-x86_64
-            python: "3.12"
-            runner: macos-13
-            container: ""
-            manylinux-plat: ""
-          - platform: macos-x86_64
-            python: "3.13"
-            runner: macos-13
             container: ""
             manylinux-plat: ""
 

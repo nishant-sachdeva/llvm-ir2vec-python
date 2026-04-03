@@ -3,7 +3,7 @@ dist/
 test-build/
 package/build/
 package/ir2vec.egg-info/
-
+test/
 # Compiled binaries
 *.so
 
