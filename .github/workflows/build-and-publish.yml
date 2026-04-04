@@ -278,7 +278,7 @@ jobs:
         run: |
           PY="${{ steps.py.outputs.exe }}"
           "$PY" -m venv /tmp/test-whl
-          /tmp/test-whl/bin/python -m pip install --no-index --find-links dist/ ir2vec
+          /tmp/test-whl/bin/python -m pip install --no-index --find-links dist/ llvm_ir2vec
           /tmp/test-whl/bin/python -c "import ir2vec; print('Wheel test: OK')"
 
       - name: Upload wheel

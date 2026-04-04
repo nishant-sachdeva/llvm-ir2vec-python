@@ -150,7 +150,7 @@ esac
 rm -rf "$WHEEL_TMPDIR"
 
 # --- Step 5: Report ---
-FINAL_WHEEL=$(find "$OUTPUT_DIR" -name "llvm_ir2vec-*.whl" | sort | tail -1)
+FINAL_WHEEL=$(find "$OUTPUT_DIR" -name "*.whl" | sort | tail -1)
 if [ -z "$FINAL_WHEEL" ]; then
     echo "ERROR: No final wheel found in $OUTPUT_DIR"
     exit 1
