@@ -21,9 +21,14 @@ Example usage::
     embeddings = tool.getFuncEmbMap()
 """
 
-from importlib.metadata import version as _get_version
-
-__version__ = _get_version("llvm-ir2vec")
+try:
+    from importlib.metadata import version as _get_version
+    __version__ = _get_version("llvm-ir2vec")
+except Exception:
+    # Package not installed (e.g., running from source tree or during testing).
+    # Fall back to a default; build_wheel.sh stamps the real version into
+    # pyproject.toml from PACKAGE_VERSION before building the wheel.
+    __version__ = "0.0.0.dev"
 
 # Re-export everything from the nanobind C++ module so users can write
 # ir2vec.initEmbedding(...) etc. directly.
