@@ -248,7 +248,7 @@ jobs:
           PY="${{ steps.py.outputs.exe }}"
           "$PY" -m venv /tmp/test-whl
           # --find-links picks up the local wheel; pip fetches deps (numpy etc.) from PyPI
-          /tmp/test-whl/bin/python -m pip install --find-links dist/ ir2vec
+          /tmp/test-whl/bin/python -m pip install --find-links dist/ llvm-ir2vec
           /tmp/test-whl/bin/python -c "import ir2vec; print('Wheel test: OK')"
 
       - name: Upload wheel
