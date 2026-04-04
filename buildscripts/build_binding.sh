@@ -128,7 +128,15 @@ mkdir -p "$BUILD_DIR"
 
 cat > "$BUILD_DIR/CMakeLists.txt" << 'EOF'
 cmake_minimum_required(VERSION 3.20)
-project(ir2vec-binding LANGUAGES CXX)
+
+# -----------------------------------------------------------------------
+# IMPORTANT: Enable both C and CXX languages.
+# HandleLLVMOptions.cmake (included from the installed LLVM config) calls
+# check_c_compiler_flag() and CHECK_C_SOURCE_COMPILES(), which require the
+# C language to be enabled. Without C, CMake errors out with:
+#   "check_compiler_flag: C: needs to be enabled before use."
+# -----------------------------------------------------------------------
+project(ir2vec-binding LANGUAGES C CXX)
 
 # --- Find pre-installed LLVM ---
 find_package(LLVM REQUIRED CONFIG)
@@ -184,10 +192,13 @@ target_compile_features(LLVMEmbUtils PRIVATE cxx_std_17)
 
 target_link_libraries(LLVMEmbUtils PUBLIC ${EMBUTILS_LLVM_LIBS})
 
-# --- Find nanobind and Python ---
-find_package(nanobind CONFIG REQUIRED)
+# --- Find Python and nanobind ---
+# IMPORTANT: nanobind's config file checks that Python is already found.
+# find_package(Python) MUST come BEFORE find_package(nanobind).
 find_package(Python ${BINDINGS_MINIMUM_PYTHON_VERSION}
   COMPONENTS Interpreter Development.Module REQUIRED)
+
+find_package(nanobind CONFIG REQUIRED)
 
 # --- Build the nanobind module ---
 nanobind_add_module(ir2vec MODULE
