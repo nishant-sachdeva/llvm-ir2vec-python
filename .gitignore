@@ -1,13 +1,12 @@
 # Build outputs
 dist/
+build-binding/
+llvm-install/
 test-build/
 package/build/
 package/ir2vec.egg-info/
 package/llvm_ir2vec.egg-info/
 test/
+
 # Compiled binaries
 *.so
-
-# Local test scripts
-test.sh
-test_all.sh

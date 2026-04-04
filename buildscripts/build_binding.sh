@@ -14,6 +14,10 @@
 # No LLVM objects are recompiled.
 #
 # Usage: ./buildscripts/build_binding.sh <python-exe> <llvm-install> <llvm-source> [output-dir]
+#
+# The output-dir should point to the ir2vec/ Python package directory inside
+# the package root (e.g., ./package/ir2vec/). The .so is placed there so that
+# setuptools can find it via package_data when building the wheel.
 
 set -euo pipefail
 
@@ -23,7 +27,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PYTHON_EXE="${1:?Usage: build_binding.sh <python-exe> <llvm-install> <llvm-source> [output-dir]}"
 LLVM_INSTALL_DIR="${2:?Usage: build_binding.sh <python-exe> <llvm-install> <llvm-source> [output-dir]}"
 LLVM_SRC_DIR="${3:?Usage: build_binding.sh <python-exe> <llvm-install> <llvm-source> [output-dir]}"
-OUTPUT_DIR="${4:-$REPO_ROOT/package}"
+OUTPUT_DIR="${4:-$REPO_ROOT/package/ir2vec}"
 BUILD_DIR="$REPO_ROOT/build-binding"
 
 PYTHON_EXE="$(readlink -f "$(command -v "$PYTHON_EXE")" 2>/dev/null || echo "$PYTHON_EXE")"
@@ -274,5 +278,5 @@ echo "Module: $DEST"
 echo "Python: $PY_VERSION"
 echo ""
 echo "Next steps:"
-echo "  1. Verify:  ./buildscripts/test_module.sh $PYTHON_EXE $OUTPUT_DIR"
-echo "  2. Package: ./buildscripts/build_wheel.sh $PYTHON_EXE $OUTPUT_DIR"
+echo "  1. Verify:  ./buildscripts/test_module.sh $PYTHON_EXE $(dirname "$OUTPUT_DIR")"
+echo "  2. Package: ./buildscripts/build_wheel.sh $PYTHON_EXE $(dirname "$OUTPUT_DIR")"

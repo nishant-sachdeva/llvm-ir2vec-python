@@ -102,6 +102,11 @@ jobs:
   # Total: 2 .cpp files + 1 link step ≈ 30 seconds. No LLVM recompilation.
   #
   # Phase 3 packages the module into a manylinux wheel via auditwheel.
+  # The wheel includes:
+  #   - ir2vec/__init__.py       (Python wrapper)
+  #   - ir2vec/ir2vec.cpython-*.so (nanobind native module)
+  #   - ir2vec/vocab.py          (vocabulary path resolver)
+  #   - ir2vec/vocab_data/*.json (bundled vocabulary files)
   # ===========================================================================
   build-wheels:
     name: "Wheel / ${{ matrix.platform }} / py${{ matrix.python }}"
@@ -218,7 +223,7 @@ jobs:
             "${{ steps.py.outputs.exe }}" \
             ./llvm-install \
             ./llvm-project \
-            ./package/
+            ./package/ir2vec/
 
       # --- Verify the module before packaging ---
       - name: Test module
@@ -242,14 +247,25 @@ jobs:
             ./package \
             ./dist/
 
-      # --- Smoke test ---
+      # --- Smoke test: install wheel in fresh venv and verify ---
       - name: Test wheel
         run: |
           PY="${{ steps.py.outputs.exe }}"
           "$PY" -m venv /tmp/test-whl
           # --find-links picks up the local wheel; pip fetches deps (numpy etc.) from PyPI
           /tmp/test-whl/bin/python -m pip install --find-links dist/ llvm-ir2vec
-          /tmp/test-whl/bin/python -c "import ir2vec; print('Wheel test: OK')"
+          /tmp/test-whl/bin/python -c "
+          import ir2vec
+          import os
+          print(f'Version: {ir2vec.__version__}')
+          assert hasattr(ir2vec, 'initEmbedding'), 'initEmbedding missing'
+          print('initEmbedding: OK')
+          assert hasattr(ir2vec, 'vocab'), 'vocab module missing'
+          path = ir2vec.vocab.seedEmbedding75D
+          assert os.path.isfile(path), f'Vocab file not found: {path}'
+          print(f'Vocab 75D: {path}')
+          print('Wheel test: OK')
+          "
 
       - name: Upload wheel
         uses: actions/upload-artifact@v4

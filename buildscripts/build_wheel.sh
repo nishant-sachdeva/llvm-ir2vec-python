@@ -6,11 +6,12 @@
 # Build a Python wheel from the ir2vec package directory (Phase 3).
 #
 # Prerequisites:
-#   - build_binding.sh has placed the ir2vec .so in package/
+#   - build_binding.sh has placed the ir2vec .so in package/ir2vec/
 #   - test_module.sh has verified the module imports correctly
+#   - package/ir2vec/ contains __init__.py, vocab.py, and vocab_data/
 #
 # This script:
-#   1. Validates the package directory structure
+#   1. Validates the package directory structure (including vocab data)
 #   2. Builds a wheel using pip
 #   3. Repairs the wheel with auditwheel (manylinux tag from MANYLINUX_PLAT)
 #   4. Outputs the final wheel to a dist/ directory
@@ -47,15 +48,38 @@ if [ ! -f "$PACKAGE_DIR/pyproject.toml" ]; then
     echo "ERROR: pyproject.toml not found in $PACKAGE_DIR"
     exit 1
 fi
+echo "  pyproject.toml: OK"
 
-MODULE_FILE=$(find "$PACKAGE_DIR" -maxdepth 1 -name "ir2vec.cpython-*" -o -name "ir2vec*.pyd" 2>/dev/null | head -1)
+# Check native module exists in ir2vec/ subdirectory
+MODULE_FILE=$(find "$PACKAGE_DIR/ir2vec" -maxdepth 1 \
+    -name "ir2vec.cpython-*" -o -name "ir2vec*.pyd" 2>/dev/null | head -1)
 if [ -z "$MODULE_FILE" ]; then
-    echo "ERROR: No ir2vec native module (.so/.pyd) found in $PACKAGE_DIR"
-    echo "Run build_binding.sh first."
+    echo "ERROR: No ir2vec native module (.so/.pyd) found in $PACKAGE_DIR/ir2vec/"
+    echo "Run build_binding.sh first (output dir should be $PACKAGE_DIR/ir2vec/)."
     exit 1
 fi
-echo "  pyproject.toml: OK"
 echo "  Native module:  $(basename "$MODULE_FILE")"
+
+# Check Python package files
+for f in ir2vec/__init__.py ir2vec/vocab.py ir2vec/vocab_data/__init__.py; do
+    if [ ! -f "$PACKAGE_DIR/$f" ]; then
+        echo "ERROR: $f not found in $PACKAGE_DIR"
+        echo "Ensure the ir2vec package directory is properly set up."
+        exit 1
+    fi
+done
+echo "  __init__.py:    OK"
+echo "  vocab.py:       OK"
+echo "  vocab_data/:    OK"
+
+# Check vocab JSON files
+VOCAB_COUNT=$(find "$PACKAGE_DIR/ir2vec/vocab_data" -name "*.json" 2>/dev/null | wc -l)
+if [ "$VOCAB_COUNT" -eq 0 ]; then
+    echo "WARNING: No vocabulary JSON files in ir2vec/vocab_data/"
+    echo "The wheel will not include bundled vocabularies."
+else
+    echo "  Vocab files:    $VOCAB_COUNT JSON file(s)"
+fi
 
 # --- Step 2: Install build tools ---
 echo ">>> Installing build tools ..."
@@ -77,6 +101,22 @@ if [ -z "$RAW_WHEEL" ]; then
     exit 1
 fi
 echo "  Raw wheel: $(basename "$RAW_WHEEL")"
+
+# Quick sanity: verify the vocab files are inside the wheel
+echo ">>> Verifying wheel contents ..."
+if ! unzip -l "$RAW_WHEEL" | grep -q "vocab_data/.*\.json"; then
+    echo "WARNING: Vocabulary JSON files not found inside the wheel."
+    echo "Check that setup.py includes package_data for ir2vec.vocab_data."
+fi
+if ! unzip -l "$RAW_WHEEL" | grep -q "ir2vec/__init__.py"; then
+    echo "ERROR: ir2vec/__init__.py not found inside the wheel."
+    echo "The wheel is missing the Python package. Check pyproject.toml and setup.py."
+    echo ""
+    echo "Wheel contents:"
+    unzip -l "$RAW_WHEEL"
+    exit 1
+fi
+echo "  Wheel contents: OK"
 
 # --- Step 4: Repair the wheel with auditwheel ---
 mkdir -p "$OUTPUT_DIR"

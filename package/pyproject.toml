@@ -39,3 +39,6 @@ Homepage = "https://llvm.org/"
 Documentation = "https://llvm.org/docs/MLGO.html#ir2vec"
 "Issue Tracker" = "https://github.com/llvm/llvm-project/issues"
 "Source Code" = "https://github.com/llvm/llvm-project/tree/main/llvm/tools/llvm-ir2vec"
+
+[tool.setuptools.packages.find]
+include = ["ir2vec*"]
