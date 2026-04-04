@@ -70,7 +70,7 @@ WHEEL_TMPDIR=$(mktemp -d)
     --no-cache-dir \
     -w "$WHEEL_TMPDIR"
 
-RAW_WHEEL=$(find "$WHEEL_TMPDIR" -name "ir2vec-*.whl" | head -1)
+RAW_WHEEL=$(find "$WHEEL_TMPDIR" -name "*.whl" | head -1)
 if [ -z "$RAW_WHEEL" ]; then
     echo "ERROR: Wheel build produced no .whl file"
     ls -la "$WHEEL_TMPDIR"
@@ -105,7 +105,7 @@ else
         echo "Copying wheel without auditwheel repair."
         cp "$RAW_WHEEL" "$OUTPUT_DIR/"
         rm -rf "$WHEEL_TMPDIR"
-        FINAL_WHEEL=$(find "$OUTPUT_DIR" -name "ir2vec-*.whl" | sort | tail -1)
+        FINAL_WHEEL=$(find "$OUTPUT_DIR" -name "*.whl" | sort | tail -1)
         echo ""
         echo "=== Phase 3 complete (unrepaired) ==="
         echo "Wheel: $FINAL_WHEEL"
@@ -122,7 +122,7 @@ fi
 rm -rf "$WHEEL_TMPDIR"
 
 # --- Step 5: Report ---
-FINAL_WHEEL=$(find "$OUTPUT_DIR" -name "ir2vec-*.whl" | sort | tail -1)
+FINAL_WHEEL=$(find "$OUTPUT_DIR" -name "*.whl" | sort | tail -1)
 if [ -z "$FINAL_WHEEL" ]; then
     echo "ERROR: No final wheel found in $OUTPUT_DIR"
     exit 1

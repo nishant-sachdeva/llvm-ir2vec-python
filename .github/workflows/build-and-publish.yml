@@ -255,7 +255,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: wheel-${{ matrix.platform }}-py${{ matrix.python }}
-          path: dist/ir2vec-*.whl
+          path: dist/*.whl
           retention-days: 7
 
   # ===========================================================================
