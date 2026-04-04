@@ -21,7 +21,9 @@ Example usage::
     embeddings = tool.getFuncEmbMap()
 """
 
-__version__ = "0.1.0"
+from importlib.metadata import version as _get_version
+
+__version__ = _get_version("llvm-ir2vec")
 
 # Re-export everything from the nanobind C++ module so users can write
 # ir2vec.initEmbedding(...) etc. directly.

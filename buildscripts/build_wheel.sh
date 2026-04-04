@@ -85,7 +85,12 @@ fi
 echo ">>> Installing build tools ..."
 "$PYTHON_EXE" -m pip install --upgrade pip setuptools wheel --quiet
 
-# --- Step 3: Build the wheel ---
+# --- Step 3: Stamp version from PACKAGE_VERSION ---
+PKG_VERSION=$(cat "$REPO_ROOT/PACKAGE_VERSION" | tr -d '[:space:]')
+echo ">>> Stamping version: $PKG_VERSION"
+sed -i "s/^version = .*/version = \"$PKG_VERSION\"/" "$PACKAGE_DIR/pyproject.toml"
+
+# --- Step 4: Build the wheel ---
 echo ">>> Building wheel ..."
 WHEEL_TMPDIR=$(mktemp -d)
 "$PYTHON_EXE" -m pip wheel "$PACKAGE_DIR" \
@@ -118,7 +123,7 @@ if ! unzip -l "$RAW_WHEEL" | grep -q "ir2vec/__init__.py"; then
 fi
 echo "  Wheel contents: OK"
 
-# --- Step 4: Repair the wheel with auditwheel ---
+# --- Step 5: Repair the wheel with auditwheel ---
 mkdir -p "$OUTPUT_DIR"
 
 echo ">>> Repairing wheel with auditwheel ..."
@@ -161,7 +166,7 @@ fi
 # Cleanup
 rm -rf "$WHEEL_TMPDIR"
 
-# --- Step 5: Report ---
+# --- Step 6: Report ---
 FINAL_WHEEL=$(find "$OUTPUT_DIR" -name "*.whl" | sort | tail -1)
 if [ -z "$FINAL_WHEEL" ]; then
     echo "ERROR: No final wheel found in $OUTPUT_DIR"
