@@ -15,11 +15,16 @@ concurrency:
   cancel-in-progress: true
 
 # ===========================================================================
-# PHASE 1: Build LLVM static libraries (once per platform)
+# PHASE 1: Build and install LLVM static libraries (once per platform)
 #
-# This is the expensive step (~15-25 min). It clones llvm-project, builds
-# all static libraries with PIC enabled, and uploads the build tree as an
-# artifact for Phase 2 to consume.
+# Builds LLVM with PIC, then runs `cmake --install` to produce a compact
+# install prefix (~200-400 MB compressed). The install prefix contains:
+#   - include/llvm/        (public headers)
+#   - lib/*.a              (static libraries)
+#   - lib/cmake/llvm/      (CMake config for find_package)
+#
+# Note: LLVMEmbUtils is BUILDTREE_ONLY and is NOT in the install prefix.
+# Phase 2 compiles it from source (1 .cpp file) alongside the binding.
 #
 # Linux builds run inside manylinux_2_28 containers to ensure the resulting
 # binaries only depend on glibc 2.28+.
@@ -28,7 +33,7 @@ jobs:
   build-llvm:
     name: "LLVM / ${{ matrix.platform }}"
     runs-on: ${{ matrix.runner }}
-    container: ${{ matrix.container != '' && matrix.container || fromJSON('null') }}
+    container: ${{ matrix.container }}
     timeout-minutes: 120
 
     strategy:
@@ -46,29 +51,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install build deps (manylinux)
+      - name: Install build deps
         run: |
           yum install -y cmake3 git
           if ! command -v cmake &>/dev/null; then
             ln -s $(which cmake3) /usr/local/bin/cmake
           fi
-          # Install Ninja via pip — arch-agnostic, always >= 1.11
-          # System ninja in manylinux_2_28 is 1.10.x, too old for LLVM's multi-output TableGen rules
           /opt/python/cp311-cp311/bin/pip install ninja
           ln -sf "$(/opt/python/cp311-cp311/bin/python -c 'import ninja; print(ninja.BIN_DIR)')/ninja" \
             /usr/local/bin/ninja
-          echo "Ninja version: $(ninja --version)"
+          echo "cmake: $(cmake --version | head -1)"
+          echo "ninja: $(ninja --version)"
 
       - name: Read LLVM version
         id: llvm-ver
         run: echo "version=$(cat LLVM_VERSION | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
 
-      - name: Cache LLVM build
+      - name: Cache LLVM install
         id: cache-llvm
         uses: actions/cache@v4
         with:
-          path: build-llvm
-          key: llvm-${{ matrix.platform }}-${{ steps.llvm-ver.outputs.version }}-${{ hashFiles('buildscripts/build_llvm.sh') }}
+          path: llvm-install
+          key: llvm-install-${{ matrix.platform }}-${{ steps.llvm-ver.outputs.version }}-${{ hashFiles('buildscripts/build_llvm.sh') }}
 
       - name: Build LLVM (Phase 1)
         if: steps.cache-llvm.outputs.cache-hit != 'true'
@@ -76,45 +80,34 @@ jobs:
           chmod +x buildscripts/build_llvm.sh
           ./buildscripts/build_llvm.sh
 
-      - name: Package build artifacts
-        run: |
-          # Package only what Phase 2 needs. Exclude object files to save space.
-          # The tar may warn about some paths not existing on all platforms — that's fine.
-          tar cf build-llvm.tar \
-            --exclude='CMakeFiles' \
-            --exclude='*.o' \
-            --exclude='*.cpp.o' \
-            build-llvm/lib/ \
-            build-llvm/include/ \
-            build-llvm/CMakeCache.txt \
-            build-llvm/tools/llvm-ir2vec/ \
-            build-llvm/build.ninja \
-            build-llvm/rules.ninja \
-          2>/dev/null || true
+      - name: Package install prefix
+        run: tar cf llvm-install.tar llvm-install/
 
-      - name: Upload LLVM build
+      - name: Upload LLVM install
         uses: actions/upload-artifact@v4
         with:
           name: llvm-${{ matrix.platform }}
-          path: build-llvm.tar
+          path: llvm-install.tar
           retention-days: 1
           compression-level: 6
 
   # ===========================================================================
   # PHASE 2 + 3: Build nanobind module + wheel (per platform × Python version)
   #
-  # IMPORTANT: Phase 2 needs the LLVM source tree for CMake reconfiguration.
-  # The build_binding.sh script will detect that the cached source path from
-  # Phase 1 doesn't exist, and will clone LLVM at the correct location.
+  # Phase 2 builds a standalone CMake project that:
+  #   1. Finds the installed LLVM via find_package(LLVM)
+  #   2. Compiles LLVMEmbUtils from source (1 file: Utils.cpp)
+  #   3. Compiles the nanobind binding (1 file: PyIR2Vec.cpp)
+  #   4. Links everything against the installed LLVM .a libraries
+  # Total: 2 .cpp files + 1 link step ≈ 30 seconds. No LLVM recompilation.
   #
-  # GitHub Actions matrix.include does NOT do cross-products — each entry is
-  # one explicit job. We list all 8 combinations (2 platforms × 4 Pythons).
+  # Phase 3 packages the module into a manylinux wheel via auditwheel.
   # ===========================================================================
   build-wheels:
     name: "Wheel / ${{ matrix.platform }} / py${{ matrix.python }}"
     needs: build-llvm
     runs-on: ${{ matrix.runner }}
-    container: ${{ matrix.container != '' && matrix.container || fromJSON('null') }}
+    container: ${{ matrix.container }}
     timeout-minutes: 30
 
     strategy:
@@ -168,45 +161,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # --- Download and extract LLVM build from Phase 1 ---
-      - name: Download LLVM build
+      # --- Download and extract LLVM install prefix ---
+      - name: Download LLVM install
         uses: actions/download-artifact@v4
         with:
           name: llvm-${{ matrix.platform }}
 
-      - name: Extract LLVM build
-        run: tar xf build-llvm.tar
+      - name: Extract LLVM install
+        run: tar xf llvm-install.tar
 
-      # --- Install build tools needed for CMake reconfiguration ---
-      # Phase 2 runs in a fresh container — cmake and ninja from Phase 1
-      # are NOT carried over. CMakeCache.txt has CMAKE_MAKE_PROGRAM pointing to
-      # ninja at its Phase 1 path, so we must install ninja and update the cache.
-      - name: Install build deps (manylinux)
+      # --- Install build tools ---
+      - name: Install build deps
         run: |
-          # cmake + git
           yum install -y cmake3 git 2>/dev/null || true
           if ! command -v cmake &>/dev/null; then
             if command -v cmake3 &>/dev/null; then
               ln -s $(which cmake3) /usr/local/bin/cmake
             fi
           fi
-          # ninja — install via pip for a consistent, recent version
           /opt/python/cp311-cp311/bin/pip install ninja
           ln -sf "$(/opt/python/cp311-cp311/bin/python -c 'import ninja; print(ninja.BIN_DIR)')/ninja" \
             /usr/local/bin/ninja
           echo "cmake: $(cmake --version | head -1)"
           echo "ninja: $(ninja --version)"
 
-          # Fix CMAKE_MAKE_PROGRAM in CMakeCache.txt — Phase 1 recorded an
-          # absolute path to ninja that doesn't exist in this container.
-          NINJA_PATH="$(which ninja)"
-          sed -i "s|^CMAKE_MAKE_PROGRAM:FILEPATH=.*|CMAKE_MAKE_PROGRAM:FILEPATH=${NINJA_PATH}|" \
-            build-llvm/CMakeCache.txt
-
-      # --- Clone LLVM source (needed for CMake reconfiguration in Phase 2) ---
-      # Phase 1 recorded an absolute source path in CMakeCache.txt that doesn't
-      # exist in this job. build_binding.sh handles this by detecting the missing
-      # source and cloning LLVM, but we can save time by cloning here once.
+      # --- Clone LLVM source for ir2vec .cpp files ---
       - name: Read LLVM version
         id: llvm-ver
         run: echo "version=$(cat LLVM_VERSION | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
@@ -217,9 +196,8 @@ jobs:
             https://github.com/llvm/llvm-project.git llvm-project
 
       # --- Set up Python ---
-      # manylinux containers have all Python versions at /opt/python/cpXYZ-cpXYZ/
-      - name: Find Python (manylinux)
-        id: py-ml
+      - name: Find Python
+        id: py
         run: |
           PY_TAG="cp$(echo '${{ matrix.python }}' | tr -d '.')"
           PY_DIR=$(find /opt/python -maxdepth 1 -name "${PY_TAG}-*" | head -1)
@@ -228,28 +206,19 @@ jobs:
             ls /opt/python/
             exit 1
           fi
-          echo "exe=${PY_DIR}/bin/python" >> "$GITHUB_OUTPUT"
-
-      - name: Resolve Python path
-        id: py
-        run: |
-          PY="${{ steps.py-ml.outputs.exe }}"
-          # Resolve to absolute path so CMake cannot find a different one
-          PY="$(readlink -f "$PY" 2>/dev/null || echo "$PY")"
+          PY="${PY_DIR}/bin/python"
           echo "exe=$PY" >> "$GITHUB_OUTPUT"
           echo "Using: $($PY --version) at $PY"
 
-      # --- Phase 2: Build nanobind module ---
+      # --- Phase 2: Build nanobind module (2 files, ~30 sec) ---
       - name: Build binding
-        env:
-          LLVM_SRC_DIR: ./llvm-project
         run: |
           chmod +x buildscripts/build_binding.sh
           ./buildscripts/build_binding.sh \
             "${{ steps.py.outputs.exe }}" \
-            ./build-llvm \
-            ./package/ \
-            ./llvm-project
+            ./llvm-install \
+            ./llvm-project \
+            ./package/
 
       # --- Verify the module before packaging ---
       - name: Test module
@@ -260,7 +229,7 @@ jobs:
             ./package/
 
       # --- Phase 3: Build and repair wheel ---
-      - name: Install patchelf (manylinux)
+      - name: Install patchelf
         run: yum install -y patchelf 2>/dev/null || "${{ steps.py.outputs.exe }}" -m pip install patchelf
 
       - name: Build wheel
@@ -273,37 +242,24 @@ jobs:
             ./package \
             ./dist/
 
-      # --- Smoke test: install wheel in clean venv and import ---
-      - name: Pre-download wheel dependencies for smoke test
-        run: |
-          PY="${{ steps.py.outputs.exe }}"
-          "$PY" -m pip download \
-            --only-binary=:all: \
-            --dest dist/ \
-            --python-version "$(echo '${{ matrix.python }}' | tr -d '.')" \
-            --platform "${{ matrix.manylinux-plat }}" \
-            numpy
-
+      # --- Smoke test ---
       - name: Test wheel
         run: |
           PY="${{ steps.py.outputs.exe }}"
           "$PY" -m venv /tmp/test-whl
-          /tmp/test-whl/bin/python -m pip install --no-index --find-links dist/ llvm_ir2vec
+          # --find-links picks up the local wheel; pip fetches deps (numpy etc.) from PyPI
+          /tmp/test-whl/bin/python -m pip install --find-links dist/ ir2vec
           /tmp/test-whl/bin/python -c "import ir2vec; print('Wheel test: OK')"
 
       - name: Upload wheel
         uses: actions/upload-artifact@v4
         with:
           name: wheel-${{ matrix.platform }}-py${{ matrix.python }}
-          path: dist/llvm-ir2vec-*.whl
+          path: dist/ir2vec-*.whl
           retention-days: 7
 
   # ===========================================================================
-  # PUBLISH to TestPyPI (every push to main or version tags)
-  #
-  # Uses OIDC trusted publishing — no API tokens needed. Configure the
-  # trusted publisher on TestPyPI before first use:
-  #   https://test.pypi.org/manage/account/publishing/
+  # PUBLISH to TestPyPI
   # ===========================================================================
   publish-testpypi:
     name: "Publish → TestPyPI"
@@ -312,7 +268,7 @@ jobs:
     if: github.event_name == 'push'
 
     permissions:
-      id-token: write  # OIDC token for trusted publishing
+      id-token: write
 
     environment:
       name: testpypi

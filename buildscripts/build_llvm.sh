@@ -4,23 +4,17 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 # Build LLVM with IR2Vec support (Phase 1).
-# Produces static libraries that Phase 2 links into per-Python-version wheels.
+# Produces an installed LLVM prefix that Phase 2 links against.
 #
-# This script builds all LLVM static libraries plus LLVMEmbUtils. We build
-# all libraries (rather than cherry-picking targets) because:
-#   - LLVMEmbUtils depends on Analysis, CodeGen, Core, Support, Target
-#   - Each of those has deep transitive deps (e.g., CodeGen -> MC, SelectionDAG,
-#     Target -> TargetParser, etc.)
-#   - With LLVM_BUILD_TOOLS=OFF and LLVM_ENABLE_PROJECTS="", building "all"
-#     only produces static libraries (~15-20 min), not executables
-#   - This is more robust than enumerating every transitive dependency
+# This script builds all LLVM static libraries plus LLVMEmbUtils, then
+# runs `cmake --install` to produce a clean install prefix. Phase 2 uses
+# this prefix to build the nanobind Python module.
 #
-# The nanobind Python module is NOT built here — that happens in Phase 2
-# (per Python version). We set LLVM_IR2VEC_ENABLE_PYTHON_BINDINGS=OFF but
-# still need the ir2vec source tree present so that LLVMEmbUtils is found
-# by CMake (it lives in llvm/tools/llvm-ir2vec/lib/).
+# Note: LLVMEmbUtils is marked BUILDTREE_ONLY in its CMakeLists.txt, so
+# it is NOT included in the install. Phase 2 compiles it from source
+# (it's just one .cpp file) and links against the installed LLVM libraries.
 #
-# Usage: ./buildscripts/build_llvm.sh [llvm-project-dir] [build-dir]
+# Usage: ./buildscripts/build_llvm.sh [llvm-project-dir] [build-dir] [install-dir]
 #
 # Environment variables:
 #   LLVM_TARGETS_TO_BUILD  - semicolon-separated targets (default: "host")
@@ -35,15 +29,17 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 LLVM_VERSION=$(cat "$REPO_ROOT/LLVM_VERSION")
 LLVM_SRC_DIR="${1:-$REPO_ROOT/llvm-project}"
 BUILD_DIR="${2:-$REPO_ROOT/build-llvm}"
+INSTALL_DIR="${3:-$REPO_ROOT/llvm-install}"
 
 TARGETS="${LLVM_TARGETS_TO_BUILD:-host}"
 BUILD_TYPE="${CMAKE_BUILD_TYPE:-Release}"
-JOBS="${PARALLEL_JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
+JOBS="${PARALLEL_JOBS:-$(nproc 2>/dev/null || echo 4)}"
 
 echo "=== IR2Vec LLVM Build (Phase 1) ==="
 echo "LLVM version : $LLVM_VERSION"
 echo "Source dir    : $LLVM_SRC_DIR"
 echo "Build dir     : $BUILD_DIR"
+echo "Install dir   : $INSTALL_DIR"
 echo "Targets       : $TARGETS"
 echo "Build type    : $BUILD_TYPE"
 echo "Parallel jobs : $JOBS"
@@ -59,39 +55,18 @@ else
 fi
 
 # --- Step 2: Configure ---
-# Key decisions documented inline:
-#
-# LLVM_ENABLE_PIC=ON
-#   Required. The static .a libraries will be linked into a shared .so
-#   (the nanobind module). Without PIC, the linker will fail with
-#   "relocation R_X86_64_32 against `.rodata' can not be used when
-#   making a shared object".
-#
-# LLVM_BUILD_TOOLS=OFF
-#   We don't need llvm-as, llc, opt, etc. in the wheel. This is the
-#   single biggest time saver — skips building ~40 executables.
-#   NOTE: This also prevents the llvm-ir2vec executable from building,
-#   but that's fine — we only need LLVMEmbUtils (the library).
-#
-# LLVM_TARGETS_TO_BUILD=host
-#   Only build codegen for the host architecture. For MIR mode support,
-#   users would need the target their IR was compiled for. "host" covers
-#   the common case (analyzing IR from the same machine). We can expand
-#   this later (e.g., "X86;AArch64;RISCV") at the cost of larger wheels.
-#
-# All optional dependencies OFF
-#   zlib, zstd, terminfo, libxml2, libedit — none of these are needed
-#   for IR2Vec embeddings. Disabling them means the resulting .so has
-#   no dynamic dependencies beyond libc/libstdc++/libm, which makes
-#   auditwheel happy.
-#
-# LLVM_IR2VEC_ENABLE_PYTHON_BINDINGS=OFF
-#   The nanobind module is built in Phase 2 (per Python version).
-#   We only build the LLVM libraries and LLVMEmbUtils here.
+# Key decisions:
+#   LLVM_ENABLE_PIC=ON       - Required: .a libs link into a shared .so
+#   LLVM_BUILD_TOOLS=OFF     - Skip ~40 executables we don't need
+#   LLVM_TARGETS_TO_BUILD    - Only host arch (minimises build time + size)
+#   All optional deps OFF    - No zlib/zstd/libxml2/libedit → no extra .so deps
+#   CMAKE_INSTALL_PREFIX     - Where `cmake --install` places the output
+#   LLVM_IR2VEC_ENABLE_PYTHON_BINDINGS=OFF - Binding built in Phase 2
 
 echo ">>> Configuring LLVM ..."
 cmake -G Ninja -S "$LLVM_SRC_DIR/llvm" -B "$BUILD_DIR" \
     -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
+    -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR" \
     -DLLVM_TARGETS_TO_BUILD="$TARGETS" \
     -DLLVM_ENABLE_PIC=ON \
     \
@@ -115,38 +90,37 @@ cmake -G Ninja -S "$LLVM_SRC_DIR/llvm" -B "$BUILD_DIR" \
     -DLLVM_IR2VEC_ENABLE_PYTHON_BINDINGS=OFF
 
 # --- Step 3: Build ---
-# Build everything. With TOOLS=OFF and PROJECTS="", "all" means:
-#   - intrinsics_gen (TableGen: generates Intrinsics*.inc headers)
-#   - All LLVM static libraries (Core, Analysis, CodeGen, MC, Target, ...)
-#   - LLVMEmbUtils (the IR2Vec utility library, from llvm/tools/llvm-ir2vec/lib/)
-#
-# This does NOT build any executables (tools are off), so it's faster
-# than a full LLVM build. Typical time: 15-25 min on a 4-core CI runner.
 echo ">>> Building LLVM libraries + LLVMEmbUtils ..."
 cmake --build "$BUILD_DIR" -j "$JOBS"
 
-# --- Step 4: Verify ---
-# Sanity check that the critical artifacts exist.
-echo ">>> Verifying build artifacts ..."
+# --- Step 4: Install ---
+echo ">>> Installing LLVM to $INSTALL_DIR ..."
+cmake --install "$BUILD_DIR"
 
-# LLVMEmbUtils should be in lib/
-EMBUTILS_LIB=$(find "$BUILD_DIR/lib" -name "libLLVMEmbUtils.a" -o -name "LLVMEmbUtils.lib" 2>/dev/null | head -1)
-if [ -z "$EMBUTILS_LIB" ]; then
-    echo "ERROR: libLLVMEmbUtils.a not found in $BUILD_DIR/lib/"
-    echo "Build may have failed or llvm-ir2vec source not found in tree."
-    exit 1
-fi
-echo "  Found: $EMBUTILS_LIB"
+# --- Step 5: Verify ---
+echo ">>> Verifying install artifacts ..."
 
-# LLVMCore should also exist (sanity check for LLVM libraries)
-CORE_LIB=$(find "$BUILD_DIR/lib" -name "libLLVMCore.a" -o -name "LLVMCore.lib" 2>/dev/null | head -1)
+CORE_LIB=$(find "$INSTALL_DIR/lib" -name "libLLVMCore.a" 2>/dev/null | head -1)
 if [ -z "$CORE_LIB" ]; then
-    echo "ERROR: libLLVMCore.a not found in $BUILD_DIR/lib/"
+    echo "ERROR: libLLVMCore.a not found in $INSTALL_DIR/lib/"
     exit 1
 fi
 echo "  Found: $CORE_LIB"
 
+LLVM_CMAKE_CONFIG=$(find "$INSTALL_DIR" -name "LLVMConfig.cmake" 2>/dev/null | head -1)
+if [ -z "$LLVM_CMAKE_CONFIG" ]; then
+    echo "ERROR: LLVMConfig.cmake not found in $INSTALL_DIR"
+    exit 1
+fi
+echo "  Found: $LLVM_CMAKE_CONFIG"
+
+# LLVMEmbUtils is BUILDTREE_ONLY — intentionally not installed.
+# Phase 2 compiles it from source (Utils.cpp) alongside the binding.
+echo ""
+echo "  Note: LLVMEmbUtils is BUILDTREE_ONLY and not in the install prefix."
+echo "  Phase 2 will compile it from source (Utils.cpp) alongside the binding."
+
 echo ""
 echo "=== Phase 1 complete ==="
-echo "Build artifacts in: $BUILD_DIR"
+echo "Install prefix: $INSTALL_DIR"
 echo "Next: run Phase 2 (build_binding.sh) for each Python version."

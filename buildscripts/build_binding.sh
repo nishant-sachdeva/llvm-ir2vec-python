@@ -5,177 +5,105 @@
 
 # Build the IR2Vec nanobind Python module (Phase 2).
 #
-# This script takes the LLVM build tree from Phase 1, reconfigures it with
-# Python bindings enabled for a specific Python interpreter, and builds only
-# the nanobind module. Since all LLVM static libraries are already built,
-# this step is fast (~30 seconds).
+# Builds a standalone CMake project against a pre-installed LLVM prefix
+# from Phase 1. Compiles only 2 files:
+#   1. Utils.cpp    → LLVMEmbUtils (ir2vec utility library, BUILDTREE_ONLY upstream)
+#   2. PyIR2Vec.cpp → ir2vec nanobind module
 #
-# The output is a shared library like:
-#   ir2vec.cpython-312-x86_64-linux-gnu.so
+# Total compile time: ~30 seconds (2 files + 1 link step).
+# No LLVM objects are recompiled.
 #
-# After this script, run test_module.sh to verify the module before packaging.
-#
-# Usage: ./buildscripts/build_binding.sh <python-executable> [build-dir] [output-dir] [llvm-source-dir]
-#
-# Arguments:
-#   python-executable  - Path to the Python interpreter to build for
-#                        (e.g., /usr/bin/python3.12, python3, etc.)
-#   build-dir          - LLVM build directory from Phase 1
-#                        (default: ./build-llvm)
-#   output-dir         - Where to copy the final .so file
-#                        (default: ./package)
-#   llvm-source-dir    - Path to llvm-project source root
-#                        (default: auto-detect from CMakeCache.txt, or ./llvm-project)
-#
-# Environment variables:
-#   LLVM_SRC_DIR       - Override the LLVM source directory (alternative to arg 4)
+# Usage: ./buildscripts/build_binding.sh <python-exe> <llvm-install> <llvm-source> [output-dir]
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-PYTHON_EXE="${1:?Usage: build_binding.sh <python-executable> [build-dir] [output-dir] [llvm-source-dir]}"
-PYTHON_EXE="$(readlink -f "$(command -v "$PYTHON_EXE")" 2>/dev/null || echo "$PYTHON_EXE")"
-BUILD_DIR="${2:-$REPO_ROOT/build-llvm}"
-OUTPUT_DIR="${3:-$REPO_ROOT/package}"
-LLVM_SRC_ARG="${4:-${LLVM_SRC_DIR:-}}"
+PYTHON_EXE="${1:?Usage: build_binding.sh <python-exe> <llvm-install> <llvm-source> [output-dir]}"
+LLVM_INSTALL_DIR="${2:?Usage: build_binding.sh <python-exe> <llvm-install> <llvm-source> [output-dir]}"
+LLVM_SRC_DIR="${3:?Usage: build_binding.sh <python-exe> <llvm-install> <llvm-source> [output-dir]}"
+OUTPUT_DIR="${4:-$REPO_ROOT/package}"
+BUILD_DIR="$REPO_ROOT/build-binding"
 
-# Validate inputs
+PYTHON_EXE="$(readlink -f "$(command -v "$PYTHON_EXE")" 2>/dev/null || echo "$PYTHON_EXE")"
+
+# --- Validate inputs ---
 if ! command -v "$PYTHON_EXE" &>/dev/null; then
     echo "ERROR: Python executable not found: $PYTHON_EXE"
     exit 1
 fi
 
-if [ ! -f "$BUILD_DIR/CMakeCache.txt" ]; then
-    echo "ERROR: No CMakeCache.txt in $BUILD_DIR"
+LLVM_INSTALL_DIR="$(cd "$LLVM_INSTALL_DIR" && pwd)"
+
+# Find LLVMConfig.cmake
+LLVM_CMAKE_DIR=""
+for candidate in \
+    "$LLVM_INSTALL_DIR/lib/cmake/llvm" \
+    "$LLVM_INSTALL_DIR/lib64/cmake/llvm" \
+    "$LLVM_INSTALL_DIR/share/llvm/cmake"; do
+    if [ -f "$candidate/LLVMConfig.cmake" ]; then
+        LLVM_CMAKE_DIR="$candidate"
+        break
+    fi
+done
+if [ -z "$LLVM_CMAKE_DIR" ]; then
+    echo "ERROR: LLVMConfig.cmake not found in $LLVM_INSTALL_DIR"
+    echo "Expected at: $LLVM_INSTALL_DIR/lib/cmake/llvm/LLVMConfig.cmake"
     echo "Run build_llvm.sh (Phase 1) first."
     exit 1
 fi
 
-# --- Resolve the LLVM source directory ---
-# Phase 1 records the absolute source path in CMakeCache.txt as CMAKE_HOME_DIRECTORY.
-# In CI, Phase 2 runs in a different job where that path may not exist (the LLVM
-# source tree is not transferred, only the build artifacts). We handle this by:
-#   1. Accepting an explicit source dir via argument or env var
-#   2. Falling back to the cached path from CMakeCache.txt
-#   3. Falling back to ./llvm-project (relative to repo root)
-#   4. If none exist, cloning LLVM at the expected location
-
-CACHED_SRC_DIR="$(grep '^CMAKE_HOME_DIRECTORY' "$BUILD_DIR/CMakeCache.txt" | cut -d= -f2)"
-
-resolve_llvm_source() {
-    # Priority 1: Explicit argument or env var
-    if [ -n "$LLVM_SRC_ARG" ] && [ -d "$LLVM_SRC_ARG/llvm" ]; then
-        echo "$LLVM_SRC_ARG/llvm"
-        return
+# Find ir2vec source directory
+IR2VEC_SRC=""
+for candidate in \
+    "$LLVM_SRC_DIR/llvm/tools/llvm-ir2vec" \
+    "$LLVM_SRC_DIR/tools/llvm-ir2vec"; do
+    if [ -d "$candidate" ] && [ -f "$candidate/CMakeLists.txt" ]; then
+        IR2VEC_SRC="$(cd "$candidate" && pwd)"
+        break
     fi
-    if [ -n "$LLVM_SRC_ARG" ] && [ -f "$LLVM_SRC_ARG/CMakeLists.txt" ]; then
-        # User passed the llvm/ subdirectory directly
-        echo "$LLVM_SRC_ARG"
-        return
-    fi
-
-    # Priority 2: Cached path from Phase 1
-    if [ -n "$CACHED_SRC_DIR" ] && [ -d "$CACHED_SRC_DIR" ]; then
-        echo "$CACHED_SRC_DIR"
-        return
-    fi
-
-    # Priority 3: Common relative locations
-    for candidate in \
-        "$REPO_ROOT/llvm-project/llvm" \
-        "$REPO_ROOT/llvm-project" \
-        "./llvm-project/llvm" \
-        "./llvm-project"; do
-        if [ -d "$candidate" ] && [ -f "$candidate/CMakeLists.txt" ]; then
-            echo "$candidate"
-            return
-        fi
-    done
-
-    # Not found
-    return 1
-}
-
-LLVM_CMAKE_SRC=""
-if LLVM_CMAKE_SRC="$(resolve_llvm_source)"; then
-    echo ">>> Found LLVM source at: $LLVM_CMAKE_SRC"
-else
-    # Need to clone LLVM. Read the version from LLVM_VERSION file.
-    LLVM_VERSION_FILE="$REPO_ROOT/LLVM_VERSION"
-    if [ ! -f "$LLVM_VERSION_FILE" ]; then
-        echo "ERROR: LLVM source not found and no LLVM_VERSION file to clone from."
-        echo "Searched:"
-        echo "  - Argument/env: $LLVM_SRC_ARG"
-        echo "  - CMakeCache:   $CACHED_SRC_DIR"
-        echo "  - Relative:     $REPO_ROOT/llvm-project/llvm"
-        echo ""
-        echo "Either:"
-        echo "  1. Pass the LLVM source path as argument 4"
-        echo "  2. Set LLVM_SRC_DIR environment variable"
-        echo "  3. Ensure llvm-project/ exists in the repo root"
-        exit 1
-    fi
-
-    LLVM_VERSION="$(cat "$LLVM_VERSION_FILE" | tr -d '[:space:]')"
-    CLONE_DIR="$REPO_ROOT/llvm-project"
-
-    echo ">>> LLVM source not found at cached path: $CACHED_SRC_DIR"
-    echo ">>> Cloning llvm-project at $LLVM_VERSION (shallow) ..."
-    git clone --depth 1 --branch "$LLVM_VERSION" \
-        https://github.com/llvm/llvm-project.git "$CLONE_DIR"
-
-    LLVM_CMAKE_SRC="$CLONE_DIR/llvm"
-
-    if [ ! -d "$LLVM_CMAKE_SRC" ]; then
-        echo "ERROR: Cloned llvm-project but $LLVM_CMAKE_SRC does not exist"
-        exit 1
-    fi
+done
+if [ -z "$IR2VEC_SRC" ]; then
+    echo "ERROR: llvm-ir2vec source not found in $LLVM_SRC_DIR"
+    exit 1
 fi
 
-# --- Update CMakeCache.txt if source path has changed ---
-# If the recorded CMAKE_HOME_DIRECTORY differs from our resolved source,
-# we need to update it so cmake doesn't reject the reconfigure.
-RESOLVED_SRC="$(cd "$LLVM_CMAKE_SRC" && pwd)"
-if [ "$CACHED_SRC_DIR" != "$RESOLVED_SRC" ]; then
-    echo ">>> Updating CMAKE_HOME_DIRECTORY in CMakeCache.txt"
-    echo "    Old: $CACHED_SRC_DIR"
-    echo "    New: $RESOLVED_SRC"
-    sed -i.bak "s|^CMAKE_HOME_DIRECTORY:INTERNAL=.*|CMAKE_HOME_DIRECTORY:INTERNAL=$RESOLVED_SRC|" \
-        "$BUILD_DIR/CMakeCache.txt"
-
-    # Also update CMAKE_CACHEFILE_DIR-related source path references
-    # that CMake might check during reconfigure
-    if grep -q "^LLVM_MAIN_SRC_DIR:PATH=" "$BUILD_DIR/CMakeCache.txt" 2>/dev/null; then
-        sed -i.bak "s|^LLVM_MAIN_SRC_DIR:PATH=.*|LLVM_MAIN_SRC_DIR:PATH=$RESOLVED_SRC|" \
-            "$BUILD_DIR/CMakeCache.txt"
+# Verify the specific source files we need
+if [ ! -f "$IR2VEC_SRC/lib/Utils.cpp" ]; then
+    echo "ERROR: $IR2VEC_SRC/lib/Utils.cpp not found"
+    exit 1
+fi
+BINDING_CPP=""
+for candidate in \
+    "$IR2VEC_SRC/Bindings/PyIR2Vec.cpp" \
+    "$IR2VEC_SRC/bindings/PyIR2Vec.cpp"; do
+    if [ -f "$candidate" ]; then
+        BINDING_CPP="$candidate"
+        break
     fi
-
-    # Fix any other references to the old source path
-    OLD_PARENT="$(dirname "$CACHED_SRC_DIR")"
-    NEW_PARENT="$(dirname "$RESOLVED_SRC")"
-    if [ "$OLD_PARENT" != "$NEW_PARENT" ]; then
-        sed -i.bak "s|$OLD_PARENT|$NEW_PARENT|g" "$BUILD_DIR/CMakeCache.txt"
-    fi
-    rm -f "$BUILD_DIR/CMakeCache.txt.bak"
+done
+if [ -z "$BINDING_CPP" ]; then
+    echo "ERROR: PyIR2Vec.cpp not found in $IR2VEC_SRC/Bindings/"
+    exit 1
 fi
 
-# Get Python version info for logging
 PY_VERSION=$("$PYTHON_EXE" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
 
 echo "=== IR2Vec Binding Build (Phase 2) ==="
 echo "Python        : $("$PYTHON_EXE" --version 2>&1) ($PYTHON_EXE)"
-echo "LLVM source   : $LLVM_CMAKE_SRC"
+echo "LLVM install  : $LLVM_INSTALL_DIR"
+echo "LLVM cmake    : $LLVM_CMAKE_DIR"
+echo "IR2Vec source : $IR2VEC_SRC"
+echo "Binding source: $BINDING_CPP"
 echo "Build dir     : $BUILD_DIR"
 echo "Output dir    : $OUTPUT_DIR"
 echo "======================================="
 
-# --- Step 1: Ensure nanobind is installed for this Python ---
+# --- Step 1: Ensure nanobind is installed ---
 echo ">>> Ensuring nanobind is installed ..."
 "$PYTHON_EXE" -m pip install nanobind --quiet 2>/dev/null || {
     echo "ERROR: Failed to install nanobind for $PYTHON_EXE"
-    echo "Make sure pip is available: $PYTHON_EXE -m pip --version"
     exit 1
 }
 
@@ -185,38 +113,139 @@ NANOBIND_CMAKE_DIR=$("$PYTHON_EXE" -m nanobind --cmake_dir 2>/dev/null) || {
 }
 echo "  nanobind cmake dir: $NANOBIND_CMAKE_DIR"
 
-# --- Step 2: Reconfigure with Python bindings ON ---
-# We re-run cmake on the existing build tree. This is fast because:
-#   - All LLVM libraries are already built (not rebuilt)
-#   - CMake only picks up the new settings (Python bindings ON)
-#   - Only the ir2vec nanobind target is new
-echo ">>> Reconfiguring with Python bindings enabled ..."
-cmake -S "$LLVM_CMAKE_SRC" \
-      -B "$BUILD_DIR" \
-    -DLLVM_IR2VEC_ENABLE_PYTHON_BINDINGS=ON \
+# --- Step 2: Generate standalone CMakeLists.txt ---
+#
+# Replicates the upstream build of:
+#   lib/CMakeLists.txt    → add_llvm_library(LLVMEmbUtils STATIC Utils.cpp
+#                             BUILDTREE_ONLY LINK_COMPONENTS Analysis CodeGen Core Support Target)
+#   Bindings/CMakeLists.txt → nanobind_add_module(ir2vec ...) + link LLVMEmbUtils
+#
+# Uses find_package(LLVM) + llvm_map_components_to_libnames() to resolve
+# the same component list into the installed .a libraries.
+
+echo ">>> Generating standalone CMakeLists.txt ..."
+mkdir -p "$BUILD_DIR"
+
+cat > "$BUILD_DIR/CMakeLists.txt" << 'EOF'
+cmake_minimum_required(VERSION 3.20)
+project(ir2vec-binding LANGUAGES CXX)
+
+# --- Find pre-installed LLVM ---
+find_package(LLVM REQUIRED CONFIG)
+message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
+message(STATUS "LLVM install prefix: ${LLVM_INSTALL_PREFIX}")
+
+list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
+include(AddLLVM)
+include(HandleLLVMOptions)
+
+# Guard: the .a libraries must have been built with PIC for shared linking
+if(NOT LLVM_ENABLE_PIC)
+  message(FATAL_ERROR
+    "Python bindings require LLVM_ENABLE_PIC=ON. "
+    "Rebuild LLVM (Phase 1) with -DLLVM_ENABLE_PIC=ON")
+endif()
+
+include_directories(${LLVM_INCLUDE_DIRS})
+separate_arguments(LLVM_DEFINITIONS_LIST NATIVE_COMMAND "${LLVM_DEFINITIONS}")
+add_definitions(${LLVM_DEFINITIONS_LIST})
+
+# --- Resolve LLVM component libraries ---
+# Same LINK_COMPONENTS as upstream lib/CMakeLists.txt
+llvm_map_components_to_libnames(EMBUTILS_LLVM_LIBS
+  Analysis
+  CodeGen
+  Core
+  Support
+  Target
+)
+message(STATUS "LLVMEmbUtils LLVM deps: ${EMBUTILS_LLVM_LIBS}")
+
+# --- Build LLVMEmbUtils as a static library ---
+# Upstream uses add_llvm_library(... BUILDTREE_ONLY) which is not usable
+# outside the LLVM build tree. We replicate it as a plain static library.
+add_library(LLVMEmbUtils STATIC
+  ${IR2VEC_SOURCE_DIR}/lib/Utils.cpp
+)
+
+target_include_directories(LLVMEmbUtils PRIVATE
+  ${IR2VEC_SOURCE_DIR}/lib
+  ${IR2VEC_SOURCE_DIR}
+  ${LLVM_INCLUDE_DIRS}
+)
+
+# LLVM is compiled with -fno-exceptions -fno-rtti via HandleLLVMOptions.
+# LLVMEmbUtils is LLVM code, so it must match. The global flags from
+# HandleLLVMOptions already set this, but we make it explicit.
+if(NOT MSVC)
+  target_compile_options(LLVMEmbUtils PRIVATE -fno-exceptions -fno-rtti)
+endif()
+target_compile_features(LLVMEmbUtils PRIVATE cxx_std_17)
+
+target_link_libraries(LLVMEmbUtils PUBLIC ${EMBUTILS_LLVM_LIBS})
+
+# --- Find nanobind and Python ---
+find_package(nanobind CONFIG REQUIRED)
+find_package(Python ${BINDINGS_MINIMUM_PYTHON_VERSION}
+  COMPONENTS Interpreter Development.Module REQUIRED)
+
+# --- Build the nanobind module ---
+nanobind_add_module(ir2vec MODULE
+  ${IR2VEC_BINDING_SOURCE}
+)
+
+# Python bindings need exceptions and RTTI to convert C++ exceptions
+# to Python exceptions. These target-level flags override the global
+# -fno-exceptions/-fno-rtti from HandleLLVMOptions for this target only.
+# This follows the MLIR Python bindings pattern.
+if(NOT MSVC)
+  target_compile_options(ir2vec PRIVATE -fexceptions -frtti)
+endif()
+target_compile_features(ir2vec PRIVATE cxx_std_17)
+
+target_link_libraries(ir2vec PRIVATE LLVMEmbUtils)
+
+# The upstream Bindings/CMakeLists.txt does:
+#   target_include_directories(ir2vec PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+# which is the llvm-ir2vec/ root. PyIR2Vec.cpp may include headers as
+# "lib/Utils.h" (relative to root) or "Utils.h" (from lib/ directly).
+# We add both to cover either pattern.
+target_include_directories(ir2vec PRIVATE
+  ${IR2VEC_SOURCE_DIR}
+  ${IR2VEC_SOURCE_DIR}/lib
+  ${LLVM_INCLUDE_DIRS}
+)
+
+message(STATUS "Will build: LLVMEmbUtils (1 file) + ir2vec nanobind module (1 file)")
+EOF
+
+# --- Step 3: Configure ---
+echo ">>> Configuring binding build ..."
+cmake -G Ninja -S "$BUILD_DIR" -B "$BUILD_DIR" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DLLVM_DIR="$LLVM_CMAKE_DIR" \
+    -DIR2VEC_SOURCE_DIR="$IR2VEC_SRC" \
+    -DIR2VEC_BINDING_SOURCE="$BINDING_CPP" \
+    -DBINDINGS_MINIMUM_PYTHON_VERSION="3.10" \
     -DPython_EXECUTABLE="$PYTHON_EXE" \
     -DPython3_EXECUTABLE="$PYTHON_EXE" \
     -Dnanobind_DIR="$NANOBIND_CMAKE_DIR"
 
-# --- Step 3: Build only the nanobind module ---
-# The target name is "ir2vec" (from nanobind_add_module(ir2vec ...) in
-# Bindings/CMakeLists.txt). This links against LLVMEmbUtils and
-# transitively against all required LLVM static libraries.
+# --- Step 4: Build ---
 echo ">>> Building nanobind module ..."
-cmake --build "$BUILD_DIR" --target ir2vec -j "$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
+cmake --build "$BUILD_DIR" --target ir2vec \
+    -j "$(nproc 2>/dev/null || echo 4)"
 
-# --- Step 4: Find and copy the built module ---
+# --- Step 5: Find and copy the built module ---
 echo ">>> Locating built module ..."
 
-# The module will be named like:
-#   ir2vec.cpython-312-x86_64-linux-gnu.so  (Linux)
-#   ir2vec.cpython-312-darwin.so             (macOS)
-#   ir2vec.cpython-312-x86_64.pyd            (Windows)
 MODULE_FILE=$(find "$BUILD_DIR" -name "ir2vec.cpython-*" -o -name "ir2vec*.pyd" 2>/dev/null | head -1)
 
 if [ -z "$MODULE_FILE" ]; then
     echo "ERROR: Built nanobind module not found in $BUILD_DIR"
-    echo "Expected a file matching ir2vec.cpython-* or ir2vec*.pyd"
+    echo ""
+    echo "Files in build dir:"
+    find "$BUILD_DIR" -name "*.so" -o -name "*.pyd" -o -name "*.dylib" 2>/dev/null || true
     exit 1
 fi
 
