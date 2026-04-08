@@ -26,12 +26,13 @@ pip install llvm-ir2vec
 ```python
 import ir2vec
 
-emb = ir2vec.Embedder(
-    filename="module.ll",
-    mode="sym",
-    vocab_path="/path/to/vocab.json",
+vocab = ir2vec.loadVocab(ir2vec.vocab.seedEmbedding75D)
+tool = ir2vec.initEmbedding(
+    filename=ll_path,
+    mode=ir2vec.IR2VecKind.Symbolic,
+    vocab=vocab,
 )
-embeddings = emb.getFuncEmbMap()
+embeddings = tool.getFuncEmbMap()
 ```
 ## Note on Package Naming
 
